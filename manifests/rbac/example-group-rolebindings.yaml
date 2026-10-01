@@ -1,0 +1,48 @@
+# OPTIONAL examples of group-based access for SSO users.
+#
+# The names must match Cognito user pool group names exactly (they arrive in
+# the `cognito:groups` claim). Create the groups in Cognito and add users to
+# them, or edit the names below to match groups you already have.
+#
+# Edit the names to match your IdP, then:
+#   kubectl apply -f generated/manifests/rbac/example-group-rolebindings.yaml
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: group-kafka-admins-system-admin
+  namespace: confluent
+spec:
+  principal:
+    type: group
+    name: kafka-admins
+  role: SystemAdmin
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: group-kafka-developers-demo-read
+  namespace: confluent
+spec:
+  principal:
+    type: group
+    name: kafka-developers
+  role: DeveloperRead
+  resourcePatterns:
+    - name: demo-
+      resourceType: Topic
+      patternType: PREFIXED
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: group-kafka-developers-demo-write
+  namespace: confluent
+spec:
+  principal:
+    type: group
+    name: kafka-developers
+  role: DeveloperWrite
+  resourcePatterns:
+    - name: demo-
+      resourceType: Topic
+      patternType: PREFIXED

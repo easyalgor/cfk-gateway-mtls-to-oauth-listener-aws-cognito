@@ -1,0 +1,38 @@
+# Permissions for the identity the gateway swaps client certificates to.
+#
+# A client connecting to the gateway with CN=${GATEWAY_CLIENT_CN} reaches Kafka
+# as User:${GATEWAY_SWAP_CLIENT_ID}. Grant it only what the application needs.
+# Here: produce/consume on topics starting with `demo-`, and use consumer
+# groups starting with `demo-`.
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: gateway-client-demo-topics-write
+  namespace: confluent
+spec:
+  principal:
+    type: user
+    name: ${GATEWAY_SWAP_CLIENT_ID}
+  role: DeveloperWrite
+  resourcePatterns:
+    - name: demo-
+      resourceType: Topic
+      patternType: PREFIXED
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: gateway-client-demo-topics-read
+  namespace: confluent
+spec:
+  principal:
+    type: user
+    name: ${GATEWAY_SWAP_CLIENT_ID}
+  role: DeveloperRead
+  resourcePatterns:
+    - name: demo-
+      resourceType: Topic
+      patternType: PREFIXED
+    - name: demo-
+      resourceType: Group
+      patternType: PREFIXED

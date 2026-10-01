@@ -1,0 +1,22 @@
+# Makes one SSO user SystemAdmin so they can manage the cluster from Control
+# Center.
+#
+# The principal is the user's `sub` claim (matches `subClaimName: sub` on the
+# MDS OIDC provider) -- not their email address.
+#
+# Why a per-user binding instead of only a group binding: Control Center opens
+# its Kafka connection on behalf of the user by asking MDS to impersonate them.
+# Group membership reaches the broker only through the MDS token's groups
+# claim, so if your IdP does not put groups in the token, group bindings work
+# in the C3 UI but writes (e.g. create topic) are denied. A user binding always
+# works. See docs/troubleshooting.md.
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: sso-admin-system-admin
+  namespace: confluent
+spec:
+  principal:
+    type: user
+    name: ${SSO_ADMIN_SUB}
+  role: SystemAdmin

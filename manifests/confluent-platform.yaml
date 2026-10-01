@@ -1,0 +1,336 @@
+# =============================================================================
+# Confluent Platform: KRaft + Kafka + Control Center (Next Gen)
+#
+#   - TLS everywhere, mTLS between Confluent components
+#   - RBAC with MDS (MDS authenticates components with mTLS, users with OAuth/OIDC)
+#   - AWS Cognito OAuth (client_credentials) for applications and the CFK operator
+#   - AWS Cognito OIDC single sign-on for Control Center
+#   - A dedicated OAuth listener (9096) for the Confluent Gateway
+#
+# ${VARS} are filled in from config.env by scripts/render.sh.
+# =============================================================================
+apiVersion: platform.confluent.io/v1beta1
+kind: KRaftController
+metadata:
+  name: kraftcontroller
+  namespace: confluent
+spec:
+  replicas: 3
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: ${STORAGE_CLASS}
+  image:
+    application: confluentinc/cp-server:8.2.1
+    init: confluentinc/confluent-init-container:3.2.2
+  configOverrides:
+    server:
+      - listener.name.controller.principal.builder.class=io.confluent.kafka.security.authenticator.OAuthKafkaPrincipalBuilder
+  tls:
+    secretRef: tls-kafka
+  listeners:
+    controller:
+      authentication:
+        type: mtls
+        principalMappingRules:
+          - "RULE:.*CN=([a-zA-Z0-9.-]*).*$/$1/"
+          - "DEFAULT"
+      tls:
+        enabled: true
+  authorization:
+    type: rbac
+    superUsers:
+      - User:kafka
+      - User:${OAUTH_CLIENT_ID}
+  dependencies:
+    mdsKafkaCluster:
+      bootstrapEndpoint: kafka.confluent.svc.cluster.local:9071
+      authentication:
+        type: mtls
+        sslClientAuthentication: true
+      tls:
+        enabled: true
+    # Control Center Next Gen: controllers push metrics to the Prometheus
+    # sidecar that runs in the Control Center pod.
+    metricsClient:
+      url: https://controlcenter.confluent.svc.cluster.local:9090
+      tls:
+        enabled: true
+        secretRef: tls-kafka
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: Kafka
+metadata:
+  name: kafka
+  namespace: confluent
+spec:
+  replicas: 3
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: ${STORAGE_CLASS}
+  image:
+    application: confluentinc/cp-server:8.2.1
+    init: confluentinc/confluent-init-container:3.2.2
+  tls:
+    secretRef: tls-kafka
+  authorization:
+    type: rbac
+    superUsers:
+      - User:kafka
+      - User:${OAUTH_CLIENT_ID}
+  listeners:
+    # 9071 - Confluent components talk to each other with mTLS.
+    internal:
+      authentication:
+        type: mtls
+        mtls:
+          sslClientAuthentication: "required"
+          principalMappingRules:
+            - "RULE:.*CN=([a-zA-Z0-9.-]*).*$/$1/"
+            - "DEFAULT"
+      tls:
+        enabled: true
+    # 9092 - Direct external access for applications: OAuth token + client cert.
+    external:
+      authentication:
+        type: oauth
+        jaasConfig:
+          secretRef: oauth-credentials
+        oauthSettings:
+          groupsClaimName: ${OAUTH_GROUPS_CLAIM}
+          jwksEndpointUri: ${OAUTH_JWKS_URI}
+          tokenEndpointUri: ${OAUTH_TOKEN_URI}
+        mtls:
+          sslClientAuthentication: "required"
+          principalMappingRules:
+            - "RULE:.*CN=([a-zA-Z0-9.-]*).*$/$1/"
+            - "DEFAULT"
+      tls:
+        enabled: true
+      externalAccess:
+        type: loadBalancer
+        loadBalancer:
+          domain: ${EXTERNAL_DOMAIN}
+          brokerPrefix: b
+          bootstrapPrefix: kafka
+    # 9096 - Upstream listener for the Confluent Gateway. OAuth only (the
+    # gateway does the client mTLS). No externalAccess, so brokers advertise
+    # kafka-N.kafka.confluent.svc.cluster.local, which the gateway pods can
+    # both resolve and validate against the tls-kafka certificate SANs.
+    custom:
+      - name: gateway
+        port: 9096
+        authentication:
+          type: oauth
+          jaasConfig:
+            secretRef: oauth-credentials
+          oauthSettings:
+            groupsClaimName: ${OAUTH_GROUPS_CLAIM}
+            jwksEndpointUri: ${OAUTH_JWKS_URI}
+            tokenEndpointUri: ${OAUTH_TOKEN_URI}
+        tls:
+          enabled: true
+  metricReporter:
+    enabled: true
+    authentication:
+      type: mtls
+    tls:
+      enabled: true
+  services:
+    kafkaRest:
+      authentication:
+        type: oauth
+        oauth:
+          secretRef: oauth-credentials
+          configuration:
+            tokenEndpointUri: ${OAUTH_TOKEN_URI}
+            expectedIssuer: ${OAUTH_ISSUER}
+            jwksEndpointUri: ${OAUTH_JWKS_URI}
+            subClaimName: ${OAUTH_SUB_CLAIM}
+        mtls:
+          sslClientAuthentication: "required"
+          principalMappingRules:
+            - RULE:^CN=([a-zA-Z0-9]*).*$/$1/
+            - DEFAULT
+    mds:
+      tls:
+        enabled: true
+      tokenKeyPair:
+        secretRef: mds-token
+      impersonation:
+        # Control Center must be allowed to call MDS on behalf of the logged-in
+        # SSO user. Without User:c3 here, C3 falls back to its own SystemAdmin
+        # principal and every user sees the whole cluster in the UI.
+        admins:
+          - User:kafka
+          - User:CN=kafka,L=Earth,ST=Pangea,C=US
+          - User:c3
+          - User:CN=c3,L=Earth,ST=Pangea,C=US
+      provider:
+        # Confluent components authenticate to MDS with their certificates.
+        mtls:
+          sslClientAuthentication: "required"
+          principalMappingRules: [ "RULE:.*CN=([a-zA-Z0-9.-]*).*$/$1/,DEFAULT" ]
+        # Applications / the operator authenticate to MDS with OAuth tokens.
+        oauth:
+          configurations:
+            # Without this, the MDS token minted for Control Center's Kafka
+            # client carries only the user principal, so group-scoped
+            # rolebindings never match on the TOKENSASL listener and C3 greys
+            # out the create-topic form.
+            groupsClaimName: ${OAUTH_GROUPS_CLAIM}
+            expectedIssuer: ${OAUTH_ISSUER}
+            jwksEndpointUri: ${OAUTH_JWKS_URI}
+            subClaimName: ${OAUTH_SUB_CLAIM}
+        # Humans log in to Control Center with OIDC SSO.
+        oidc:
+          clientCredentials:
+            secretRef: oidccredential
+          configurations:
+            groupsClaimName: ${OAUTH_GROUPS_CLAIM}
+            subClaimName: sub
+            issuer: ${OAUTH_ISSUER}
+            jwksEndpointUri: ${OAUTH_JWKS_URI}
+            authorizeBaseEndpointUri: ${OIDC_AUTHORIZE_URI}
+            tokenBaseEndpointUri: ${OAUTH_TOKEN_URI}
+            refreshToken: false
+  dependencies:
+    kafkaRest:
+      authentication:
+        type: oauth
+        jaasConfig:
+          secretRef: oauth-credentials
+        oauthSettings:
+          tokenEndpointUri: ${OAUTH_TOKEN_URI}
+          expectedIssuer: ${OAUTH_ISSUER}
+          jwksEndpointUri: ${OAUTH_JWKS_URI}
+          subClaimName: ${OAUTH_SUB_CLAIM}
+        sslClientAuthentication: true
+      tls:
+        enabled: true
+        secretRef: tls-kafka
+    kRaftController:
+      controllerListener:
+        tls:
+          enabled: true
+        authentication:
+          type: mtls
+      clusterRef:
+        name: kraftcontroller
+    # Control Center Next Gen: brokers push metrics to the Prometheus
+    # sidecar that runs in the Control Center pod.
+    metricsClient:
+      url: https://controlcenter.confluent.svc.cluster.local:9090
+      tls:
+        enabled: true
+        secretRef: tls-kafka
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ControlCenter
+metadata:
+  name: controlcenter
+  namespace: confluent
+spec:
+  replicas: 1
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: ${STORAGE_CLASS}
+  image:
+    application: confluentinc/cp-enterprise-control-center-next-gen:2.5.0
+    init: confluentinc/confluent-init-container:3.2.2
+  authorization:
+    type: rbac
+  tls:
+    secretRef: tls-controlcenter
+  podTemplate:
+    probe:
+      liveness:
+        periodSeconds: 10
+        failureThreshold: 5
+        timeoutSeconds: 500
+  # RBAC + MDS with mTLS-only authentication (CP 8.0.0+).
+  # Without these, C3's Kafka client connects on the internal listener (9071)
+  # with plain mTLS, so every request is made as User:c3 (SystemAdmin) and the
+  # UI shows all topics to every SSO user regardless of their rolebindings.
+  # Pointing the client at the TOKENSASL listener (9075) over SASL_SSL/
+  # OAUTHBEARER lets C3 carry the logged-in user's MDS token, so the broker's
+  # RBAC authorizer filters results per user.
+  # https://docs.confluent.io/operator/current/co-rbac.html#c3-rbac-and-mds-with-mtls-only-authentication
+  configOverrides:
+    server:
+      - bootstrap.servers=kafka.confluent.svc.cluster.local:9075
+      - confluent.controlcenter.streams.security.protocol=SASL_SSL
+      - confluent.controlcenter.streams.sasl.mechanism=OAUTHBEARER
+      - 'confluent.controlcenter.streams.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required metadataServerUrls="https://kafka.confluent.svc.cluster.local:8090";'
+      - confluent.controlcenter.streams.sasl.login.callback.handler.class=io.confluent.kafka.clients.plugins.auth.token.TokenCertificateLoginCallbackHandler
+  # Optional: expose Control Center through a cloud LoadBalancer instead of
+  # `kubectl port-forward`. Add the resulting URL to your IdP's callback URLs.
+  # externalAccess:
+  #   type: loadBalancer
+  #   loadBalancer:
+  #     domain: ${EXTERNAL_DOMAIN}   # -> controlcenter.<domain>
+  #     annotations:
+  #       service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+  dependencies:
+    kafka:
+      bootstrapEndpoint: kafka.confluent.svc.cluster.local:9071
+      authentication:
+        type: mtls
+      tls:
+        enabled: true
+    mds:
+      ssoProtocol: oidc
+      endpoint: https://kafka.confluent.svc.cluster.local:8090
+      tokenKeyPair:
+        secretRef: mds-token
+      authentication:
+        type: mtls
+        sslClientAuthentication: true
+      tls:
+        enabled: true
+    prometheusClient:
+      url: https://controlcenter.confluent.svc.cluster.local:9090
+      tls:
+        enabled: true
+        secretRef: tls-controlcenter
+    alertManagerClient:
+      url: https://controlcenter.confluent.svc.cluster.local:9093
+      tls:
+        enabled: true
+        secretRef: tls-controlcenter
+  services:
+    prometheus:
+      image: confluentinc/cp-enterprise-prometheus:2.5.0
+      tls:
+        secretRef: tls-controlcenter
+      pvc:
+        dataVolumeCapacity: 10Gi
+    alertmanager:
+      image: confluentinc/cp-enterprise-alertmanager:2.5.0
+      tls:
+        secretRef: tls-controlcenter
+---
+# Required by the CFK operator to apply ConfluentRolebinding and KafkaTopic CRs
+# through the MDS-hosted REST API. Without a KafkaRestClass named `default`,
+# rolebindings fail with "kafkarestclass default not found" and Control Center
+# is denied on startup.
+apiVersion: platform.confluent.io/v1beta1
+kind: KafkaRestClass
+metadata:
+  name: default
+  namespace: confluent
+spec:
+  kafkaClusterRef:
+    name: kafka
+    namespace: confluent
+  kafkaRest:
+    endpoint: https://kafka.confluent.svc.cluster.local:8090
+    authentication:
+      type: oauth
+      oauth:
+        secretRef: oauth-credentials
+        configuration:
+          tokenEndpointUri: ${OAUTH_TOKEN_URI}
+          scope: ${COGNITO_SCOPE}
+      sslClientAuthentication: true
+    tls:
+      secretRef: tls-kafka

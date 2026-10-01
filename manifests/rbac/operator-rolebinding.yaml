@@ -1,0 +1,18 @@
+# The CFK operator calls the MDS-hosted Kafka REST API (port 8090) with the
+# service client from the `oauth-credentials` secret (see the `default`
+# KafkaRestClass). That principal is User:<clientId>.
+#
+# Listing the client under `superUsers` is not enough: that only bypasses the
+# broker authorizer for native Kafka requests. The REST layer authorizes
+# against RBAC rolebindings, so without this one every KafkaTopic apply fails
+# with "Authorization failed. (40301)".
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: operator-system-admin
+  namespace: confluent
+spec:
+  principal:
+    type: user
+    name: ${OAUTH_CLIENT_ID}
+  role: SystemAdmin

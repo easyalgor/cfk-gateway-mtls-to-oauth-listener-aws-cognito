@@ -1,0 +1,81 @@
+# =============================================================================
+# Confluent Gateway: client mTLS -> AWS Cognito OAuth auth swap
+#
+#   client --mTLS (CN=${GATEWAY_CLIENT_CN})--> gateway --OAuth token--> kafka:9096
+#
+# 1. The client presents a certificate signed by the CA in `gateway-tls`.
+# 2. The gateway maps the certificate CN to a principal (e.g. `alice`).
+# 3. It looks the principal up in the `file-store-client-credentials` secret
+#    and finds "<clientId>/<clientSecret>".
+# 4. It fetches an OAuth token for that client from Cognito and connects to
+#    the brokers' `gateway` listener (9096) with SASL/OAUTHBEARER.
+# 5. Kafka authorizes the request as User:<clientId> using RBAC.
+#
+# ${VARS} are filled in from config.env by scripts/render.sh.
+# =============================================================================
+apiVersion: platform.confluent.io/v1beta1
+kind: Gateway
+metadata:
+  name: confluent-gateway
+  namespace: confluent
+spec:
+  replicas: 3
+  image:
+    application: confluentinc/cpc-gateway:1.0.0-1-ubi9
+    init: confluentinc/confluent-init-container:3.1.0
+  secretStores:
+    - name: file-store
+      provider:
+        type: File
+        configSecretRef: file-store-config
+        clientCredentialsRef: file-store-client-credentials
+  streamingDomains:
+    - name: oauth-kafka
+      type: kafka
+      kafkaCluster:
+        bootstrapServers:
+          - id: OAUTH
+            endpoint: kafka.confluent.svc.cluster.local:9096
+            tls:
+              secretRef: tls-kafka
+        # Kafka broker IDs (kafka-0 .. kafka-2). Widen if you scale the brokers.
+        nodeIdRanges:
+          - name: pool-1
+            start: 0
+            end: 2
+  routes:
+    - name: swap-mtls-oauth-route
+      # Bootstrap port; brokers get the following ports (9596, 9597, 9598).
+      endpoint: ${GATEWAY_DOMAIN}:9595
+      brokerIdentificationStrategy:
+        type: port
+      streamingDomain:
+        name: oauth-kafka
+        bootstrapServerId: OAUTH
+      security:
+        auth: swap
+        secretStore: file-store
+        client:
+          tls:
+            secretRef: gateway-tls
+          authentication:
+            type: mtls
+            mtls:
+              principalMappingRules: [ "RULE:^CN=([^,]+).*$/$1/" ]
+              sslClientAuthentication: "required"
+        cluster:
+          authentication:
+            type: oauth
+            jaasConfigPassThrough:
+              secretRef: gateway-oauth-jaas
+            oauthSettings:
+              tokenEndpointUri: ${OAUTH_TOKEN_URI}
+  podTemplate:
+    envVars:
+      # The gateway refuses to call OAuth endpoints that are not allow-listed.
+      - name: GATEWAY_OPTS
+        value: "-Dorg.apache.kafka.sasl.oauthbearer.allowed.urls=${OAUTH_TOKEN_URI}"
+  externalAccess:
+    type: loadBalancer
+    loadBalancer:
+      domain: ${GATEWAY_DOMAIN}

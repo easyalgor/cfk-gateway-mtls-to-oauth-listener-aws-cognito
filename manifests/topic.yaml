@@ -1,0 +1,16 @@
+# A demo topic, created by the CFK operator through the `default` KafkaRestClass.
+# The gateway client is allowed to produce/consume `demo-*` topics.
+apiVersion: platform.confluent.io/v1beta1
+kind: KafkaTopic
+metadata:
+  name: demo-topic
+  namespace: confluent
+spec:
+  replicas: 3
+  partitionCount: 3
+  kafkaClusterRef:
+    name: kafka
+    namespace: confluent
+  kafkaRestClassRef:
+    name: default
+    namespace: confluent

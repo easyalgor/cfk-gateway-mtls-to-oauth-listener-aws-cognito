@@ -1,0 +1,11 @@
+# Kafka client config for connecting through the Confluent Gateway.
+#
+# Authentication is the client certificate only (CN=${GATEWAY_CLIENT_CN}).
+# No OAuth settings are needed here: the gateway swaps the certificate identity
+# for an OAuth token before talking to Kafka.
+security.protocol=SSL
+ssl.truststore.location=${CLIENT_CERT_DIR}/client-truststore.jks
+ssl.truststore.password=${CLIENT_STORE_PASSWORD}
+ssl.keystore.location=${CLIENT_CERT_DIR}/client-keystore.jks
+ssl.keystore.password=${CLIENT_STORE_PASSWORD}
+ssl.key.password=${CLIENT_STORE_PASSWORD}
